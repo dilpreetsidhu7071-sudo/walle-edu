@@ -1,3 +1,4 @@
+print("LOADED udp_receiver FROM:", __file__)
 import logging
 from walle_edu.logging_setup import setup_logging
 from walle_edu.config import Config
