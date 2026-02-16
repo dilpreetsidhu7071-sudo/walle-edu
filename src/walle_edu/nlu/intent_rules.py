@@ -9,6 +9,19 @@ def _norm(t: str) -> str:
 
 def parse_rules(text: str) -> Dict[str, Any]:
     t = _norm(text)
+    # Common speech-to-text mis-hear fixes (Whisper + accents + noise)
+    COMMON_FIXES = {
+        "for word": "forward",
+        "for ward": "forward",
+        "go foreword": "forward",
+        "lift": "left",
+        "write": "right",
+        "grip her": "gripper",
+        "open grip her": "open gripper",
+        "close grip her": "close gripper",
+    }
+    for wrong, right in COMMON_FIXES.items():
+        t = t.replace(wrong, right)
 
     speed = "normal"
     if "slow" in t or "slowly" in t:

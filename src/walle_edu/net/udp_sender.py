@@ -1,22 +1,20 @@
-import json
 import socket
+import json
 import logging
-from dataclasses import dataclass
-from typing import Dict, Any
 
-log = logging.getLogger("walle.net.sender")
+log = logging.getLogger("walle.udp")
 
-@dataclass
+
 class UDPSender:
-    ip: str
-    port: int
+    def __init__(self, ip: str, port: int):
+        self.ip = ip
+        self.port = port
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def send(self, payload: Dict[str, Any]) -> None:
-        msg = json.dumps(payload).encode("utf-8")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def send(self, payload):
         try:
-            sock.sendto(msg, (self.ip, self.port))
-            log.info("Sent UDP to %s:%s -> %s", self.ip, self.port, payload)
-        finally:
-            sock.close()
+            data = json.dumps(payload).encode("utf-8")
+            self.socket.sendto(data, (self.ip, self.port))
+        except Exception as e:
+            log.error("UDP send failed: %s", e)
 

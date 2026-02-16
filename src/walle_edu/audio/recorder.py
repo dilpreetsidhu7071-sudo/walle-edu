@@ -1,18 +1,27 @@
 import subprocess
 import logging
-from dataclasses import dataclass
 
-log = logging.getLogger("walle.audio.recorder")
+log = logging.getLogger("recorder")
 
-@dataclass
+
 class Recorder:
-    record_seconds: int
-    wav_path: str
+    def __init__(self, seconds, wav_path):
+        self.seconds = seconds
+        self.wav_path = wav_path
 
-    def record(self) -> None:
-        """
-        Records audio using arecord. In VirtualBox if mic sleeps, keep pavucontrol open.
-        """
-        cmd = ["arecord", "-f", "cd", "-d", str(self.record_seconds), self.wav_path]
-        log.info("Recording %ss to %s", self.record_seconds, self.wav_path)
-        subprocess.run(cmd, check=False)
+    def record(self):
+        # Recording  audio using arecord (Linux)
+        command = [
+            "arecord",
+            "-f", "S16_LE",
+            "-r", "16000",
+            "-c", "1",
+            "-d", str(self.seconds),
+            self.wav_path,
+        ]
+
+        try:
+            subprocess.run(command)
+        except Exception as e:
+            log.error("Audio recording failed: %s", e)
+
