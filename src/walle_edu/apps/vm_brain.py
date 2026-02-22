@@ -1,5 +1,7 @@
+
 import logging
 import os
+import random
 import re
 import time
 from dotenv import load_dotenv
@@ -20,350 +22,284 @@ from walle_edu.edu.qa_chatgpt import answer_educational
 
 log = logging.getLogger("walle.vm_brain")
 
+# ---------------- Voice phrases ----------------
 
-# ===== Voice phrases (you can change these anytime) =====
-WAKE_WORDS = (
-    "wake up",
-    "wakeup",
-    "wall e wake up",
-    "walle wake up",
-    "wall-e wake up",
-)
+WAKE_WORDS = ("wake up", "walle wake up", "wall e wake up")
+SLEEP_WORDS = ("go to sleep", "sleep now", "walle sleep")
 
-SLEEP_WORDS = (
-    "go to sleep",
-    "sleep now",
-    "wall e sleep",
-    "walle sleep",
-    "wall-e sleep",
-)
-
-# Whisper catches these better than only "stop speaking"
 STOP_WORDS = (
-    "abort",
-    "cancel",
-    "stop now",
-    "wall e stop",
-    "walle stop",
-    "wall-e stop",
-    "stop speaking",
-    "stop talking",
-    "be quiet",
-    "quiet",
-    "mute",
+    "stop", "stop now", "stop it", "stopped",
+    "cancel", "abort",
+    "stop talking", "be quiet", "mute",
+    "shut up"
 )
 
-INTRO_WORDS = (
-    "introduce yourself",
-    "who are you",
-    "what are you",
-)
+INTRO_WORDS = ("introduce yourself", "who are you")
+HELP_WORDS = ("help", "what can you do", "commands")
 
-# ===== Small behaviour tuning =====
-MAX_FAILS_BEFORE_HELP = 2
+# Simple movement phrases (fast detection)
+MOVE_WORDS = {
+    "forward": ("forward", "go forward", "move forward"),
+    "back": ("back", "go back", "move back"),
+    "left": ("left", "turn left"),
+    "right": ("right", "turn right"),
+}
+
+# ---------------- Human responses ----------------
+
+ACKS = ["Okay.", "Alright.", "Got it."]
+WAKE_ACKS = ["I'm awake."]
+SLEEP_ACKS = ["Going to sleep. Say wake up to wake me."]
+CONFUSED = ["Sorry, can you repeat that?", "I didn’t catch that clearly."]
+TEACH_START = ["Alright, here’s the idea.", "Good question."]
+
+# ---------------- Settings ----------------
+
 MIN_TEXT_LEN = 3
-MIN_ALPHA_RATIO = 0.60
 
-# Long answer chunking (for clearer TTS)
-MAX_CHARS_PER_CHUNK = 240
-MAX_SENTENCES_PER_CHUNK = 3
-
-# While WALL-E is speaking, we record small clips just to listen for stop words.
-# Keep it an integer because arecord -d often doesn't support decimals.
-INTERRUPT_SECONDS = 1
+# IMPORTANT: This file is used ONLY for quick interrupt listening (STOP detection)
 INTERRUPT_WAV = "/tmp/walle_interrupt.wav"
 
+# Keep short so STOP feels instant
+INTERRUPT_SECONDS = 1
 
-# ----------------- Text cleaning / helpers -----------------
+# ---------------- Helpers ----------------
 
-def _has_any(text_lower: str, phrases) -> bool:
-    return any(p in text_lower for p in phrases)
+def pick(options):
+    return random.choice(options)
 
+def norm(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-def _alpha_ratio(s: str) -> float:
-    if not s:
-        return 0.0
-    letters = sum(ch.isalpha() for ch in s)
-    return letters / max(len(s), 1)
+def contains(text: str, phrases) -> bool:
+    t = norm(text)
+    return any(p in t for p in phrases)
 
+def looks_bad(text: str) -> bool:
+    return not text or len(text.strip()) < MIN_TEXT_LEN
 
-def _looks_uncertain(stt_text: str) -> bool:
+def clean_for_tts(text: str) -> str:
     """
-    Quick heuristics for low-quality transcripts (noise / mumbling):
-    - too short
-    - too many non-letters
+    Remove markdown, code blocks, weird symbols, and links so espeak
+    doesn't read them as "symbols".
     """
-    s = (stt_text or "").strip()
-    if len(s) < MIN_TEXT_LEN:
-        return True
-    if _alpha_ratio(s) < MIN_ALPHA_RATIO:
-        return True
-    return False
-
-
-def _clean_for_tts(text: str) -> str:
-    """Remove markdown/code stuff so speech sounds normal."""
     if not text:
         return ""
 
-    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)      # code blocks
-    text = re.sub(r"`([^`]+)`", r"\1", text)                    # inline code
-    text = re.sub(r"^\s*[-*•]+\s*", "", text, flags=re.M)       # bullets
-    text = re.sub(r"^\s*#+\s*", "", text, flags=re.M)           # headings
+    # Remove code blocks ```...```
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 
-    text = text.replace("|", " ")
-    for ch in ("*", "_", "~", "^"):
-        text = text.replace(ch, "")
+    # Remove inline code `like this`
+    text = re.sub(r"`[^`]+`", "", text)
 
-    text = re.sub(r"([!?.,:;])\1+", r"\1", text)                # !!! -> !
-    text = re.sub(r"\s+", " ", text).strip()                    # whitespace
+    # Remove markdown headings/bullets
+    text = re.sub(r"^\s*#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*•]+\s*", "", text, flags=re.MULTILINE)
+
+    # Remove links
+    text = re.sub(r"https?://\S+", "", text)
+
+    # Keep letters/numbers/basic punctuation only
+    text = re.sub(r"[^a-zA-Z0-9\s\.\,\?\!\:\;\'\"\-\(\)]", " ", text)
+
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
     return text
 
+# ---------------- Audio helpers ----------------
 
-def _split_sentences(text: str) -> list[str]:
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-
-
-# ----------------- Speech + interrupt logic -----------------
-
-def _listen_for_stop(interrupt_recorder: Recorder, stt: WhisperSTT) -> bool:
+def listen_for_stop(rec: Recorder, stt: WhisperSTT) -> bool:
     """
-    Records a short snippet and checks for stop words.
-    This is only used while WALL-E is speaking.
+    Record a very short clip and check if it contains STOP words.
+    Used for quick interrupt while speaking AND as a fast check when idle.
     """
-    try:
-        if os.path.exists(INTERRUPT_WAV):
-            os.remove(INTERRUPT_WAV)
+    if os.path.exists(INTERRUPT_WAV):
+        os.remove(INTERRUPT_WAV)
 
-        interrupt_recorder.record()
-
-        if not os.path.exists(INTERRUPT_WAV):
-            return False
-
-        heard = stt.transcribe(INTERRUPT_WAV) or ""
-        h = heard.lower().strip()
-
-        if not h:
-            return False
-
-        return _has_any(h, STOP_WORDS)
-
-    except Exception:
-        # keep it quiet in the terminal
-        log.debug("interrupt listening failed", exc_info=True)
+    rec.record()
+    if not os.path.exists(INTERRUPT_WAV):
         return False
 
+    heard = stt.transcribe(INTERRUPT_WAV) or ""
+    return contains(heard, STOP_WORDS)
 
-def _wait_until_done_or_stopped(tts: EspeakTTS, interrupt_recorder: Recorder, stt: WhisperSTT) -> bool:
+def wait_or_interrupt(tts: EspeakTTS, rec: Recorder, stt: WhisperSTT) -> bool:
     """
-    Waits for speech to finish.
-    While waiting, allow user to stop speech.
-    Returns True if speech was interrupted.
+    While TTS is playing, keep checking for STOP.
+    If STOP is heard, stop TTS and return True.
     """
     while tts.is_playing():
-        if _listen_for_stop(interrupt_recorder, stt):
+        if listen_for_stop(rec, stt):
             tts.stop()
             return True
-        time.sleep(0.05)
+        time.sleep(0.1)
     return False
 
+# ---------------- Robot helpers ----------------
 
-def _say_long(tts: EspeakTTS, interrupt_recorder: Recorder, stt: WhisperSTT, text: str) -> None:
+def stop_robot(sender: UDPSender):
+    sender.send({"type": "MOVE", "action": "stop"})
+
+def emergency_stop(sender: UDPSender, tts: EspeakTTS):
+    stop_robot(sender)
+    tts.stop()
+
+def quick_move(text: str):
+    t = norm(text)
+    for action, phrases in MOVE_WORDS.items():
+        for p in phrases:
+            if p in t:
+                return {"type": "MOVE", "action": action}
+    return None
+
+def safe_speak(tts: EspeakTTS, text: str):
     """
-    Speak a long answer in chunks so it doesn't get cut off.
-    Each chunk can be interrupted by stop words.
+    Always clean before speaking.
     """
-    cleaned = _clean_for_tts(text)
-    if not cleaned:
-        tts.speak("I don’t have an answer right now.")
-        _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-        return
+    tts.speak(clean_for_tts(text))
 
-    sentences = _split_sentences(cleaned)
-    if not sentences:
-        tts.speak(cleaned)
-        _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-        return
+# ---------------- Main ----------------
 
-    chunk = ""
-    count = 0
-
-    for s in sentences:
-        candidate = (chunk + " " + s).strip() if chunk else s
-
-        if chunk and (len(candidate) > MAX_CHARS_PER_CHUNK or count >= MAX_SENTENCES_PER_CHUNK):
-            tts.speak(chunk)
-            if _wait_until_done_or_stopped(tts, interrupt_recorder, stt):
-                return
-            chunk = s
-            count = 1
-        else:
-            chunk = candidate
-            count += 1
-
-    if chunk:
-        tts.speak(chunk)
-        _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-
-
-# ----------------- Main handlers -----------------
-
-def _intro(tts: EspeakTTS, interrupt_recorder: Recorder, stt: WhisperSTT) -> None:
-    _say_long(
-        tts,
-        interrupt_recorder,
-        stt,
-        "Hi, I’m WALL-E. I’m an educational robot. "
-        "I can follow voice commands like forward, left, right and stop, "
-        "and I can also answer educational questions."
-    )
-
-
-def _handle_robot(intent: dict, sender: UDPSender, tts: EspeakTTS,
-                  interrupt_recorder: Recorder, stt: WhisperSTT) -> None:
-    sender.send(intent)
-
-    intent_type = intent.get("type")
-    action = (intent.get("action") or "").strip() or "done"
-
-    if intent_type == "MOVE":
-        tts.speak(f"Okay, {action}.")
-    else:
-        tts.speak(f"Gripper {action}.")
-
-    _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-
-
-def _handle_edu(query: str, cfg: Config, tts: EspeakTTS,
-                interrupt_recorder: Recorder, stt: WhisperSTT) -> None:
-    gate = decide(query, cfg.edu_mode)
-
-    if gate == "ALLOW":
-        if cfg.use_chatgpt_edu:
-            answer = answer_educational(query, cfg.edu_model, cfg.edu_temperature)
-            _say_long(tts, interrupt_recorder, stt, answer)
-        else:
-            tts.speak("Ask me an educational question like maths, chemistry, science, or physics.")
-            _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-        return
-
-    if gate == "REFUSE":
-        tts.speak("Sorry, I can answer only educational questions.")
-        _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-        return
-
-    # redirect response (still spoken as chunks)
-    _say_long(tts, interrupt_recorder, stt, redirect_message(query))
-
-
-def main() -> None:
+def main():
     load_dotenv()
     setup_logging()
 
     cfg = Config()
 
+    # Main recording (normal listening)
     recorder = Recorder(cfg.record_seconds, cfg.wav_path)
-    stt = WhisperSTT(cfg.whisper_model)
 
-    # only used while speaking
-    interrupt_recorder = Recorder(INTERRUPT_SECONDS, INTERRUPT_WAV)
+    # Interrupt recording (very short, for STOP detection)
+    interrupt_rec = Recorder(INTERRUPT_SECONDS, INTERRUPT_WAV)
+
+    stt = WhisperSTT(cfg.whisper_model)
 
     nlu = NLURouter(cfg.use_chatgpt_nlu, cfg.nlu_model, cfg.nlu_temperature)
     sender = UDPSender(cfg.pi_ip, cfg.pi_port)
     tts = EspeakTTS(cfg.tts_enabled, cfg.tts_speed, cfg.tts_amplitude)
 
-    log.info("VM Brain started (%s).", cfg.robot_name)
-    log.info("UDP target: %s:%s", cfg.pi_ip, cfg.pi_port)
-
     awake = False
-    no_hear = 0
-    unsure = 0
+    last_spoken = ""
+
+    log.info("WALL-E VM Brain started")
 
     while True:
         try:
-            # If something is still speaking, wait (and allow stop)
-            _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
+            # If we are speaking, allow STOP to interrupt speech
+            wait_or_interrupt(tts, interrupt_rec, stt)
 
+            # NEW: Even if we are NOT speaking, do a quick STOP check
+            # This makes STOP feel instant (doesn't wait for long record_seconds)
+            if listen_for_stop(interrupt_rec, stt):
+                emergency_stop(sender, tts)
+                msg = pick(ACKS)
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
+                continue
+
+            # Normal listening (longer clip)
             recorder.record()
             text = stt.transcribe(cfg.wav_path)
-
-            if not text:
-                no_hear += 1
-                log.info("No speech detected.")
-                if awake:
-                    if no_hear <= MAX_FAILS_BEFORE_HELP:
-                        tts.speak("I didn’t catch that. Please try again.")
-                    else:
-                        tts.speak("Sorry, I still can’t hear clearly. Try speaking closer and slower.")
-                        no_hear = 0
-                    _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-                continue
-
-            no_hear = 0
-
-            t = text.lower().strip()
             log.info("Heard: %s", text)
 
-            # stop words always allowed
-            if _has_any(t, STOP_WORDS):
-                tts.stop()
-                tts.speak("Okay.")
-                _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
+            if looks_bad(text):
+                if awake:
+                    msg = pick(CONFUSED)
+                    safe_speak(tts, msg)
+                    last_spoken = msg
+                    wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            # sleep command
-            if _has_any(t, SLEEP_WORDS):
+            t = norm(text)
+
+            # -------- PRIORITY 1: STOP --------
+            if contains(t, STOP_WORDS):
+                emergency_stop(sender, tts)
+                msg = pick(ACKS)
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
+                continue
+
+            # -------- SLEEP / WAKE --------
+            if contains(t, SLEEP_WORDS):
                 awake = False
-                tts.stop()
-                tts.speak("Going to sleep. Say wake up to wake me.")
-                _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
+                stop_robot(sender)
+                msg = pick(SLEEP_ACKS)
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            # waking up
             if not awake:
-                if _has_any(t, WAKE_WORDS):
+                if contains(t, WAKE_WORDS):
                     awake = True
-                    tts.speak("I'm awake.")
-                    _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
-                else:
-                    log.info("Asleep: ignoring until wake word.")
+                    msg = pick(WAKE_ACKS)
+                    safe_speak(tts, msg)
+                    last_spoken = msg
+                    wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            # awake mode from here
-            if _looks_uncertain(text):
-                unsure += 1
-                if unsure <= MAX_FAILS_BEFORE_HELP:
-                    tts.speak("I might be wrong — can you repeat that?")
-                else:
-                    tts.speak("I’m not sure I understood. Please say it again slowly.")
-                    unsure = 0
-                _wait_until_done_or_stopped(tts, interrupt_recorder, stt)
+            # -------- PRIORITY 2: MOVE --------
+            move = quick_move(text)
+            if move:
+                sender.send(move)
+                msg = f"{pick(ACKS)} Moving {move['action']}."
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            unsure = 0
+            # -------- PRIORITY 3: CHAT --------
+            # Always stop robot before chatting
+            stop_robot(sender)
 
-            if _has_any(t, INTRO_WORDS):
-                _intro(tts, interrupt_recorder, stt)
+            if contains(t, HELP_WORDS):
+                msg = (
+                    "You can move me with forward, back, left, right, or stop. "
+                    "You can also ask me educational questions."
+                )
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            intent = nlu.parse(text) or {}
-            log.info("Intent: %s", intent)
-
-            intent_type = intent.get("type")
-            if intent_type in ("MOVE", "GRIPPER"):
-                _handle_robot(intent, sender, tts, interrupt_recorder, stt)
+            if contains(t, INTRO_WORDS):
+                msg = (
+                    "Hi, I’m WALL-E. I’m an educational robot. "
+                    "I can move using voice commands and answer questions."
+                )
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
                 continue
 
-            query = intent.get("query") or text
-            _handle_edu(query, cfg, tts, interrupt_recorder, stt)
+            # Educational chat
+            gate = decide(text, cfg.edu_mode)
+            if gate == "ALLOW":
+                safe_speak(tts, pick(TEACH_START))
+                wait_or_interrupt(tts, interrupt_rec, stt)
 
-            time.sleep(0.2)
+                answer = answer_educational(text, cfg.edu_model, cfg.edu_temperature)
+                answer = clean_for_tts(answer)
+                safe_speak(tts, answer)
+                last_spoken = answer
+                wait_or_interrupt(tts, interrupt_rec, stt)
+            else:
+                msg = redirect_message(text)
+                safe_speak(tts, msg)
+                last_spoken = msg
+                wait_or_interrupt(tts, interrupt_rec, stt)
 
         except KeyboardInterrupt:
-            log.info("Exiting.")
+            log.info("Shutting down")
             break
         except Exception:
-            log.exception("Error in VM Brain loop")
+            log.exception("Error in main loop")
             time.sleep(0.5)
 
 
