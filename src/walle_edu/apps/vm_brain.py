@@ -76,7 +76,8 @@ def _handle_educational_chat(query: str, cfg: Config, tts: EspeakTTS) -> None:
     if gate == "ALLOW":
         if cfg.use_chatgpt_edu:
             answer = answer_educational(query, cfg.edu_model, cfg.edu_temperature)
-            tts.speak(answer or "I can answer educational questions, but I’m offline right now.")
+            clean_answer =clean_for_tts(answer)
+            tts.speak(clean_answer or "I can answer educational questions, but I’m offline right now.")
         else:
             tts.speak("Ask me an educational question like maths, chemistry, science, or physics .")
         return
@@ -86,7 +87,7 @@ def _handle_educational_chat(query: str, cfg: Config, tts: EspeakTTS) -> None:
         return
 
     # redirecting
-    tts.speak(redirect_message(query))
+    tts.speak( clean_for_tts(redirect_message(query)))
 
 
 def main() -> None:
