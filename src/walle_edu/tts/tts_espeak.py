@@ -1,5 +1,5 @@
-import subprocess
 import logging
+import subprocess
 import tempfile
 import os
 
@@ -7,10 +7,38 @@ log = logging.getLogger("walle.tts")
 
 
 class EspeakTTS:
-    def __init__(self, enabled: bool, speed: str, amplitude: str):
+    def __init__(self, enabled: bool, speed: int, amplitude: int):
         self.enabled = enabled
+        self.speed = speed
+        self.amplitude = amplitude
 
-    def speak(self, text: str):
+        self._play_proc: subprocess.Popen | None = None
+        self._wav_path: str | None = None
+
+    def is_playing(self) -> bool:
+        return self._play_proc is not None and self._play_proc.poll() is None
+
+    def stop(self) -> None:
+        try:
+            if self._play_proc and self._play_proc.poll() is None:
+                self._play_proc.terminate()
+                try:
+                    self._play_proc.wait(timeout=0.2)
+                except Exception:
+                    self._play_proc.kill()
+        except Exception:
+            log.exception("Failed to stop TTS playback")
+        finally:
+            self._play_proc = None
+
+            if self._wav_path and os.path.exists(self._wav_path):
+                try:
+                    os.remove(self._wav_path)
+                except Exception:
+                    pass
+            self._wav_path = None
+
+    def speak(self, text: str) -> None:
         if not self.enabled:
             return
 
@@ -18,21 +46,24 @@ class EspeakTTS:
         if not text:
             return
 
-        wav_path = None
+        self.stop()
 
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                wav_path = f.name
+            fd, wav_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            self._wav_path = wav_path
 
-            subprocess.run(["pico2wave", "-w", wav_path, text], check=True)
+            gen_cmd = [
+                "espeak",
+                f"-s{self.speed}",
+                f"-a{self.amplitude}",
+                "-w", wav_path,
+                text,
+            ]
+            subprocess.run(gen_cmd, check=True)
 
-            # Play sound (no unsupported --volume flag)
-            subprocess.run(["aplay", "-q", wav_path], check=False)
+            self._play_proc = subprocess.Popen(["aplay", "-q", wav_path])
 
-        except Exception as e:
-            log.error("TTS failed: %s", e)
-
-        finally:
-            if wav_path and os.path.exists(wav_path):
-                os.remove(wav_path)
-
+        except Exception:
+            log.exception("TTS speak failed")
+            self.stop()
