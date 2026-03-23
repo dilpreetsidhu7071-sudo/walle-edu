@@ -25,7 +25,7 @@ from walle_edu.edu.qa_chatgpt import answer_educational
 log = logging.getLogger("walle.vm_brain")
 
 
-# commands for the wall-E
+# commands used for wall-E
 WAKE_WORDS        = ("wake up", "walle wake up", "wall e wake up")
 SLEEP_WORDS       = ("go to sleep", "sleep now", "walle sleep")
 
@@ -59,7 +59,6 @@ NOISE_TEXTS = {
     "bye", "yes", "no", "hmm", "mm", "uh", "um"
 }
 
-#  check the silence before running whisper to save 2-3s of transcription time.
 
 
 def is_silent_wav(path: str, threshold: int = 300) -> bool:
@@ -80,7 +79,6 @@ def is_silent_wav(path: str, threshold: int = 300) -> bool:
 
 
 # helpers
-
 def pick(xs):
     return random.choice(xs)
 
@@ -147,8 +145,6 @@ def looks_like_noise(text: str) -> bool:
     return False
 
 
-# FastVASMic
-
 class FastVADMic:
     def __init__(
         self,
@@ -156,16 +152,16 @@ class FastVADMic:
         rate: int     = 16000,
         channels: int = 1,
 
-        # lower = more sensitive, higher = better at  ignoring background noises
+        # lower = more sensitive, higher = ignores more background noise
         rms_threshold: int = 450,
 
-        #  how long to cut off after the silence
+        # how long after silence to cut off  — keep low for fast response
         silence_ms: int    = 200,
 
-        # minimum length of speech that begin to transcribe.
+        # minimum speech length to begin transcribing 
         min_speech_ms: int = 150,
 
-        # max utterance length
+        # max utterance length before force-cutting
         max_utt_s: float   = 6.0,
     ):
         self.device   = device
@@ -272,12 +268,10 @@ class FastVADMic:
                         frames        = []
                         silence_count = 0
                         speech_frames = 0
-
-
+#  speak without any interruption
 
 def speak_interruptible(chunks, tts, mic, stt, stop_flag: threading.Event) -> bool:
-    """Speak chunks; poll mic every 40ms so STOP works instantly."""
-    for chunk in chunks:
+     for chunk in chunks:
         if stop_flag.is_set():
             return False
 
@@ -288,7 +282,7 @@ def speak_interruptible(chunks, tts, mic, stt, stop_flag: threading.Event) -> bo
 
             wav = mic.pop_wav()
             if wav:
-                # silence check before running Whisper
+                # check the silence before running whisper
                 if not is_silent_wav(wav):
                     interim = (stt.transcribe(wav) or "").strip()
                 else:
@@ -307,12 +301,14 @@ def speak_interruptible(chunks, tts, mic, stt, stop_flag: threading.Event) -> bo
                     stop_flag.set()
                     return False
 
-        time.sleep(0.06)   # small gap inorder to  prevents crackling in voice.
+        time.sleep(0.06)   # small gap → prevents crackling
 
     return True
 
 
-# commands for the robot
+# ─────────────────────────────────────────────
+#  Robot helpers
+# ─────────────────────────────────────────────
 
 def stop_robot(sender):
     sender.send({"type": "MOVE", "action": "stop"})
@@ -325,7 +321,10 @@ def quick_move(text: str):
                 return {"type": "MOVE", "action": action}
     return None
 
-# Main
+
+# ─────────────────────────────────────────────
+#  Main
+# ─────────────────────────────────────────────
 
 def main():
     load_dotenv()
@@ -358,10 +357,10 @@ def main():
         while True:
             wav_path = mic.pop_wav()
             if not wav_path:
-                time.sleep(0.005)   
+                time.sleep(0.005)   # tight loop = fast reaction
                 continue
 
-            
+            # ── silence gate (skip Whisper on quiet audio) ────────────
             if is_silent_wav(wav_path):
                 try:
                     os.remove(wav_path)
@@ -369,7 +368,7 @@ def main():
                     pass
                 continue
 
-            # transcribe
+            # ── transcribe ────────────────────────────────────────────
             text = (stt.transcribe(wav_path) or "").strip()
             try:
                 os.remove(wav_path)
@@ -378,7 +377,7 @@ def main():
 
             t = norm(text)
 
-            
+            # deduplicate repeated transcriptions
             if t == last_text:
                 continue
             last_text = t
@@ -388,7 +387,7 @@ def main():
 
             log.info("Heard: %s", text)
 
-            # interrupt the speech
+            # ── interrupt speech ──────────────────────────────────────
             if tts.is_playing() and contains(t, SPEECH_STOP_WORDS):
                 try:
                     tts.stop()
@@ -399,27 +398,27 @@ def main():
                 stop_flag.clear()
                 continue
 
-            # sleep
+            # ── sleep ─────────────────────────────────────────────────
             if contains(t, SLEEP_WORDS):
                 awake = False
                 stop_robot(sender)
                 tts.speak(pick(SLEEP_ACKS))
                 continue
 
-            # wake
+            # ── wake ──────────────────────────────────────────────────
             if not awake:
                 if contains(t, WAKE_WORDS):
                     awake = True
                     tts.speak(pick(WAKE_ACKS))
                 continue
 
-            # stop
+            # ── robot stop ────────────────────────────────────────────
             if contains(t, ROBOT_STOP_WORDS):
                 stop_robot(sender)
                 tts.speak(pick(ACKS))
                 continue
 
-            #  movement 
+            # ── movement ──────────────────────────────────────────────
             move = quick_move(text)
             if move:
                 sender.send(move)
@@ -431,10 +430,10 @@ def main():
                 stop_flag.clear()
                 continue
 
-            #  stop robot before any chat
+            # ── stop robot before any chat ────────────────────────────
             stop_robot(sender)
 
-            #  help 
+            # ── help ──────────────────────────────────────────────────
             if contains(t, HELP_WORDS):
                 stop_flag.clear()
                 speak_interruptible(
@@ -448,7 +447,7 @@ def main():
                 stop_flag.clear()
                 continue
 
-            #  intro 
+            # ── intro ─────────────────────────────────────────────────
             if contains(t, INTRO_WORDS):
                 stop_flag.clear()
                 speak_interruptible(
@@ -458,14 +457,14 @@ def main():
                 stop_flag.clear()
                 continue
 
-            #  NLU 
+            # ── NLU ──────────────────────────────────────────────────
             intent = nlu.parse(text) or {}
             if intent.get("type") in ("MOVE", "GRIPPER"):
                 sender.send(intent)
                 tts.speak(pick(ACKS))
                 continue
 
-            #  educational Q&A 
+            # ── educational Q&A ───────────────────────────────────────
             query = intent.get("query") or text
             gate  = decide(query, cfg.edu_mode)
             stop_flag.clear()

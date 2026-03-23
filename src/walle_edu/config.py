@@ -30,8 +30,8 @@ class Config:
     robot_name: str = get_str("ROBOT_NAME", "walle")
 
     # Speech-to-text (Whisper model)
-    whisper_model: str = get_str("WHISPER_MODEL", "small")
-    record_seconds: int = get_int("RECORD_SECONDS", 6)
+    whisper_model: str = get_str("WHISPER_MODEL", "tiny")
+    record_seconds: int = get_int("RECORD_SECONDS", 3)
     wav_path: str = get_str("WAV_PATH", "/tmp/walle_cmd.wav")
 
     # LLM model ( language understanding)
