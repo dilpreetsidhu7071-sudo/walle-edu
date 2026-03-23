@@ -11,11 +11,11 @@ class WhisperSTT:
     whisper_model: str
 
     def __post_init__(self) -> None:
-        # In starting , loading of whisper model is initiated
+        # In  begining the whisper model start loading
         log.info("Loading Faster-Whisper model: %s", self.whisper_model)
         self.model = WhisperModel(self.whisper_model, compute_type="int8")
 
-        # some unneccesary short words that will be ignored.
+        # some useless words that can be ignored.
         self._ignored_words = {
             "you", "yeah", "yah", "um", "uh", "okay", "ok"
         }
@@ -30,7 +30,7 @@ class WhisperSTT:
                 condition_on_previous_text=False,
             )
         except Exception:
-            #  If there is failure in the system because of bad recording , system will remain working.
+            # the system will keep working if is there issue with bad recording.
             log.exception(" Failure in speech transcription")
             return ""
 
@@ -40,10 +40,10 @@ class WhisperSTT:
         if not text:
             return ""
 
-        # removal of symbols,commas and question marks to make filtertaion simple.
+        # Remove symbols,commas and signs during voice generation.
         cleaned = re.sub(r"[^a-zA-Z]+", "", text).lower()
 
-        # Ignore unneccesary short response.
+        # Ignore short reponse
         if cleaned in self._ignored_words:
             return ""
 
