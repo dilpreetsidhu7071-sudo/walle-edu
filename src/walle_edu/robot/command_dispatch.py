@@ -11,6 +11,6 @@ def dispatch(robot, payload: Dict[str, Any]) -> None:
         robot.gripper(payload.get("action", "stop"), payload.get("strength", "normal"))
         return
 
-    # Unknown payload types should always result in safety stop
+    # always stop if payload is unknown.
     robot.stop_all()
 
